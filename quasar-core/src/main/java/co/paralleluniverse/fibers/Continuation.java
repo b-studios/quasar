@@ -36,7 +36,7 @@ public abstract class Continuation<S extends Suspend, T> implements Runnable, Se
 
     private static final ThreadLocal<Continuation> currentContinuation = new ThreadLocal<>();
 
-    private final Class<S> scope;
+    private final S scope;
     private Callable<T> target;
     private Stack stack;
     private ThreadData threadData;
@@ -50,7 +50,7 @@ public abstract class Continuation<S extends Suspend, T> implements Runnable, Se
     private static final ThreadLocal<CalledCC> calledcc = new ThreadLocal<>();
 
     @SuppressWarnings("LeakingThisInConstructor")
-    public Continuation(Class<S> scope, boolean detached, int stackSize, Callable<T> target) {
+    public Continuation(S scope, boolean detached, int stackSize, Callable<T> target) {
         if (scope == null)
             throw new IllegalArgumentException("Scope is null");
         this.target = target;
@@ -62,11 +62,11 @@ public abstract class Continuation<S extends Suspend, T> implements Runnable, Se
         // Debug.printStackTrace(10, System.err);
     }
 
-    public Continuation(Class<S> scope, boolean detached, Callable<T> target) {
+    public Continuation(S scope, boolean detached, Callable<T> target) {
         this(scope, detached, 0, target);
     }
 
-    public Continuation(Class<S> scope, Callable<T> target) {
+    public Continuation(S scope, Callable<T> target) {
         this(scope, false, 0, target);
     }
 
@@ -188,7 +188,7 @@ public abstract class Continuation<S extends Suspend, T> implements Runnable, Se
     }
 
     protected String getScopeName() {
-        return scope.getSimpleName();
+        return scope.toString();
     }
 
     static Continuation getCurrentContinuation() {
@@ -285,9 +285,7 @@ public abstract class Continuation<S extends Suspend, T> implements Runnable, Se
         }
     }
 
-    protected boolean isScope(Throwable s) {
-        return scope.isInstance(s);
-    }
+    protected boolean isScope(Throwable s) { return scope == s; }
 
     private static boolean isFiberScope(Throwable s) {
         return s instanceof SuspendExecution || s instanceof RuntimeSuspendExecution;

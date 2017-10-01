@@ -45,7 +45,7 @@ public class CoIterable<E> implements Iterable<E> {
         private E next;
 
         public CoIterator(final Generator<E> generator) {
-            c = new ValuedContinuation<CoIteratorScope, Void, E, Void>(CoIteratorScope.class, new Callable<Void>() {
+            c = new ValuedContinuation<CoIteratorScope, Void, E, Void>(SCOPE, new Callable<Void>() {
                 @Override
                 @Suspendable
                 public Void call() {

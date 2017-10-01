@@ -22,15 +22,15 @@ public class ValuedContinuation<S extends Suspend, T, Out, In> extends Continuat
     private In pauseIn;
     private RuntimeException pauseInException;
 
-    public ValuedContinuation(Class<S> scope, boolean detached, int stackSize, Callable<T> target) {
+    public ValuedContinuation(S scope, boolean detached, int stackSize, Callable<T> target) {
         super(scope, detached, stackSize, target);
     }
 
-    public ValuedContinuation(Class<S> scope, boolean detached, Callable<T> target) {
+    public ValuedContinuation(S scope, boolean detached, Callable<T> target) {
         super(scope, detached, target);
     }
 
-    public ValuedContinuation(Class<S> scope, Callable<T> target) {
+    public ValuedContinuation(S scope, Callable<T> target) {
         super(scope, target);
     }
 

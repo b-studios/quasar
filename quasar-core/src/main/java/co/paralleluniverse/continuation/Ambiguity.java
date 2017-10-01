@@ -72,7 +72,7 @@ public class Ambiguity<T> {
         private boolean isClone = true; // trick
 
         public AmbContinuation(Ambiguity<T> ambiguity, final Ambiguous<T> target) {
-            super(AmbScope.class, new Callable<T>() {
+            super(SCOPE, new Callable<T>() {
                 @Override
                 @Suspendable
                 public T call() {
