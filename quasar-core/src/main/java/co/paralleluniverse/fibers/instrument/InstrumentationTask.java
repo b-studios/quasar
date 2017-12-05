@@ -119,9 +119,12 @@ public class InstrumentationTask extends Task {
     @Override
     public void execute() throws BuildException {
         try {
+            // extract all URLs from the fileset
             final List<URL> urls = new ArrayList<>();
             for (FileSet fs : filesets)
                 urls.add(fs.getDir().toURI().toURL());
+
+
             final ClassLoader cl = new URLClassLoader(urls.toArray(new URL[0]), getClass().getClassLoader());
             final QuasarInstrumentor instrumentor = new QuasarInstrumentor(true, cl, new DefaultSuspendableClassifier(cl));
 
@@ -156,6 +159,7 @@ public class InstrumentationTask extends Task {
                 }
             });
 
+            // find all class-files in included files and invoke instrumentor.checkClass(file)
             for (FileSet fs : filesets) {
                 final DirectoryScanner ds = fs.getDirectoryScanner(getProject());
                 final String[] includedFiles = ds.getIncludedFiles();

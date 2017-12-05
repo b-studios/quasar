@@ -45,7 +45,6 @@ public final class Stack implements Serializable {
     private static final long serialVersionUID = 12786283751253L;
     private final Object context;
     private int sp;
-    private transient boolean shouldVerifyInstrumentation;
     private transient boolean pushed;
     private Object suspendedContext;
     private long[] dataLong;        // holds primitives on stack as well as each method's entry point and the stack pointer
@@ -66,16 +65,6 @@ public final class Stack implements Serializable {
         this.context = context;
         this.dataLong = Arrays.copyOf(s.dataLong, s.dataLong.length);
         this.dataObject = Arrays.copyOf(s.dataObject, s.dataObject.length);
-
-//        for (int i = 0; i < dataObject.length; i++) {
-//            if (dataObject[i] instanceof Continuation) {
-//                Continuation c = (Continuation) dataObject[i];
-//                if (c == s.context)
-//                    dataObject[i] = context;
-//                if (c != s.context)
-//                    dataObject[i] = c.clone();
-//            }
-//        }
         resumeStack();
     }
 
@@ -84,11 +73,6 @@ public final class Stack implements Serializable {
         return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this)) + "{sp: " + sp + " pauseContext: " + Objects.systemToStringSimpleName(suspendedContext) + '}';
     }
 
-//    public static Stack getStack() {
-//        Stack s = getStack0();
-//        System.err.println("STACK: " + s + " : " + (s != null ? s.context : "null"));
-//        return s;
-//    }
 
     public static Stack getStack() {
         final Continuation<?, ?> currentCont = Continuation.getCurrentContinuation();
@@ -101,7 +85,6 @@ public final class Stack implements Serializable {
     }
 
     void setSuspendedContext(Object context) {
-        // System.err.println("SET_PAUSE_CONTEXT: " + this + " <- " + context);
         this.suspendedContext = context;
     }
 
@@ -117,13 +100,17 @@ public final class Stack implements Serializable {
 
     Object getSuspendedContext() {
         return suspendedContext;
-//        Object c = suspendedContext;
-//        System.err.println("GET_PAUSE_CONTEXT: " + this + " : " + c);
-//        return c;
     }
 
     /**
      * called when resuming a stack
+     *
+     * this is enough since the containing coroutine / fiber is
+     * also instrumented. Running it will jump into the right
+     * entry point of the next method which in turn will jump
+     * into the next entry point and so forth. This continues
+     * until the shadow-stack is "copied" from the heap to
+     * the actual JVM stack.
      */
     final void resumeStack() {
         sp = 0;
@@ -137,11 +124,12 @@ public final class Stack implements Serializable {
     /**
      * called at the beginning of a method
      *
+     * either the entry has been pushed before by usage of
+     * "pushMethod" or it is assumed to be 0
+     *
      * @return the entry point of this method
      */
     public final int nextMethodEntry() {
-        shouldVerifyInstrumentation = true;
-
         int idx = 0;
         int slots = 0;
         if (sp > 0) {
@@ -151,12 +139,9 @@ public final class Stack implements Serializable {
         sp = idx + FRAME_RECORD_SIZE;
         long record = dataLong[idx];
         int entry = getEntry(record);
+        // TODO understand why we set slots here again?
         dataLong[idx] = setPrevNumSlots(record, slots);
-        if (Debug.isDebug() && isRecordingLevel(2))
-            record(2, "Stack", "nextMethodEntry", "%s %s %s", Thread.currentThread().getStackTrace()[2], entry, sp /*Arrays.toString(fiber.getStackTrace())*/);
 
-        // System.err.println("NEXT_ENTRY: " + idx + " # " + entry + " SP: " + sp);
-        // Debug.printStackTrace(10, System.err);
         return entry;
     }
 
@@ -172,7 +157,6 @@ public final class Stack implements Serializable {
 
         // not first, but nextMethodEntry returned 0: revert changes
         sp -= FRAME_RECORD_SIZE + getPrevNumSlots(dataLong[sp - FRAME_RECORD_SIZE]);
-        // System.err.println("CORRECT_SP: SP: " + sp + " pushed: " + p);
 
         return false;
     }
@@ -184,7 +168,6 @@ public final class Stack implements Serializable {
      * @param numSlots the number of required stack slots for storing the state of the current method
      */
     public final void pushMethod(int entry, int numSlots) {
-        shouldVerifyInstrumentation = false;
         pushed = true;
 
         int idx = sp - FRAME_RECORD_SIZE;
@@ -200,19 +183,10 @@ public final class Stack implements Serializable {
 
         // clear next method's frame record
         dataLong[nextMethodIdx] = 0L;
-//        for (int i = 0; i < FRAME_RECORD_SIZE; i++)
-//            dataLong[nextMethodIdx + i] = 0L;
-
-        // System.err.println("PUSH_METHOD: " + idx + " # " + entry + " # " + numSlots + " SP: " + sp);
-        if (Debug.isDebug() && isRecordingLevel(2))
-            record(2, "Stack", "pushMethod     ", "%s %s %s %s %d", Thread.currentThread().getStackTrace()[2], entry, sp /*Arrays.toString(fiber.getStackTrace())*/);
     }
 
     public final void popMethod() {
-        if (shouldVerifyInstrumentation) {
-            Fiber.verifySuspend(null);
-            shouldVerifyInstrumentation = false;
-        }
+
         pushed = false;
 
         final int oldSP = sp;
@@ -221,29 +195,19 @@ public final class Stack implements Serializable {
         final int slots = getNumSlots(record);
         final int newSP = idx - getPrevNumSlots(record);
 
-        // clear frame record (probably unnecessary)
+        // clear frame record
+        // ---
+        // this is essential, since the stackpointer needs to be 0
+        // next time we encounter a new method call.
         dataLong[idx] = 0L;
-//        for (int i = 0; i < FRAME_RECORD_SIZE; i++)
-//            dataLong[idx + i] = 0L;
+
         // help GC
         for (int i = oldSP; i < oldSP + slots; i++)
             dataObject[i] = null;
 
-        sp = newSP; // Math.max(newSP, 0)
-
-        // System.err.println("POP_METHOD SP:" + sp);
-        if (Debug.isDebug() && isRecordingLevel(2))
-            record(2, "Stack", "popMethod      ", "%s %s %s", Thread.currentThread().getStackTrace()[2], sp /*Arrays.toString(fiber.getStackTrace())*/);
+        sp = newSP;
     }
 
-    public final void postRestore() throws SuspendExecution, InterruptedException {
-        if (context instanceof Fiber)
-            ((Fiber) context).onResume();
-    }
-
-//    public final void preemptionPoint(int type) throws SuspendExecution {
-//        fiber.preemptionPoint(type);
-//    }
     private void growStack(int required) {
         int newSize = dataObject.length;
         do {
@@ -254,171 +218,65 @@ public final class Stack implements Serializable {
         dataObject = Arrays.copyOf(dataObject, newSize);
     }
 
-    void dump() {
+    public void dump() {
         int m = 0;
         int k = 0;
         while (k < sp - 1) {
             final long record = dataLong[k++];
             final int slots = getNumSlots(record);
 
-            System.err.println("\tm=" + (m++) + " entry=" + getEntry(record) + " sp=" + k + " slots=" + slots + " prevSlots=" + getPrevNumSlots(record));
+            System.out.println("\tm=" + (m++) + " entry=" + getEntry(record) + " sp=" + k + " slots=" + slots + " prevSlots=" + getPrevNumSlots(record));
             for (int i = 0; i < slots; i++, k++)
-                System.err.println("\t\tsp=" + k + " long=" + dataLong[k] + " obj=" + dataObject[k]);
+                System.out.println("\t\tsp=" + k + " long=" + dataLong[k] + " obj=" + dataObject[k]);
         }
     }
 
-    //<editor-fold defaultstate="collapsed" desc="Unused">
-    /////////// Unused ///////////////////////////////////
-    final void pushContinuation(Continuation<?, ?> c) {
-        int i = nextMethodEntry();
-        assert i == 0;
-        pushMethod(0, 0);
-        dataObject[sp - FRAME_RECORD_SIZE] = c;
-    }
 
-    final void popContinuation(Continuation<?, ?> c) {
-        assert dataObject[sp - FRAME_RECORD_SIZE] == c;
-        popMethod();
-    }
-
-    final Continuation<?, ?> getContinuation() {
-        int i = nextMethodEntry();
-        assert i == 0;
-        Continuation<?, ?> c = (Continuation<?, ?>) dataObject[sp - FRAME_RECORD_SIZE];
-        // pushMethod(0, 0);
-        return c;
-    }
-    //</editor-fold>
-
-    //<editor-fold defaultstate="collapsed" desc="Unused">
-    /////////// Unused ///////////////////////////////////
-    /**
-     * Returns the index of the record of the last method.
-     */
-    final int capturePosition() {
-        int res = sp == 0 ? sp : sp - FRAME_RECORD_SIZE;
-        // System.err.println("CAPTURE: " + res);
-        return res;
-    }
-
-    final void takeTop(Stack s, int captured) {
-        int start = captured + FRAME_RECORD_SIZE + getNumSlots(s.dataLong[captured]);
-        int k = start;
-        int slots;
-        do {
-            final long record = s.dataLong[k];
-            slots = getNumSlots(record);
-            k += FRAME_RECORD_SIZE + slots;
-        } while (slots > 0);
-
-        int n = k - start;
-        if (n > this.dataLong.length)
-            growStack(n);
-        System.arraycopy(s.dataObject, start, this.dataObject, 0, n);
-        System.arraycopy(s.dataLong, start, this.dataLong, 0, n);
-
-        Arrays.fill(s.dataObject, start, start + n, null);
-        s.dataLong[start] = 0L;
-        s.sp = captured + FRAME_RECORD_SIZE;
-
-        // System.err.println("MOVE_TOP " + s + " -> " + this + ": " + captured);
-        // System.err.println("MOVE_TOP start: " + start + " n: " + n + " SP: " + s.sp);
-    }
-
-    final void putTop(Stack s, int captured) {
-        int start = captured + FRAME_RECORD_SIZE + getNumSlots(s.dataLong[captured]);
-        int k = 0;
-        int slots;
-        do {
-            final long record = dataLong[k];
-            slots = getNumSlots(record);
-            k += FRAME_RECORD_SIZE + slots;
-        } while (slots > 0);
-
-        int n = k;
-        if (start + n > s.dataLong.length)
-            s.growStack(start + n);
-        System.arraycopy(this.dataObject, 0, s.dataObject, start, n);
-        System.arraycopy(this.dataLong, 0, s.dataLong, start, n);
-
-        Arrays.fill(this.dataObject, 0, n, null);
-        this.dataLong[0] = 0L;
-        this.sp = 0;
-
-        // System.err.println("PUT_TOP " + this + " -> " + s + ": " + captured);
-        // System.err.println("PUT_TOP start: " + start + " n: " + n);
-    }
-    // </editor-fold>
-
+    //<editor-fold defaultstate="collapsed" desc="Specialized Push Methods">
+    /////////// Specialized Push Methods ///////////////////////////////////
     public static void push(int value, Stack s, int idx) {
-//        if (s.fiber.isRecordingLevel(3))
-//            s.fiber.record(3, "Stack", "push", "%d (%d) %s", idx, s.sp + idx, value);
         s.dataLong[s.sp + idx] = value;
     }
 
     public static void push(float value, Stack s, int idx) {
-//        if (s.fiber.isRecordingLevel(3))
-//            s.fiber.record(3, "Stack", "push", "%d (%d) %s", idx, s.sp + idx, value);
         s.dataLong[s.sp + idx] = Float.floatToRawIntBits(value);
     }
 
     public static void push(long value, Stack s, int idx) {
-//        if (s.fiber.isRecordingLevel(3))
-//            s.fiber.record(3, "Stack", "push", "%d (%d) %s", idx, s.sp + idx, value);
         s.dataLong[s.sp + idx] = value;
     }
 
     public static void push(double value, Stack s, int idx) {
-//        if (s.fiber.isRecordingLevel(3))
-//            s.fiber.record(3, "Stack", "push", "%d (%d) %s", idx, s.sp + idx, value);
         s.dataLong[s.sp + idx] = Double.doubleToRawLongBits(value);
     }
 
     public static void push(Object value, Stack s, int idx) {
-//        if (s.fiber.isRecordingLevel(3))
-//            s.fiber.record(3, "Stack", "push", "%d (%d) %s", idx, s.sp + idx, value);
         s.dataObject[s.sp + idx] = value;
     }
+    //</editor-fold>
 
+    //<editor-fold defaultstate="collapsed" desc="Specialized Stack Accessors">
+    /////////// Specialized Stack Accessors ///////////////////////////////////
     public final int getInt(int idx) {
         return (int) dataLong[sp + idx];
-//        final int value = (int) dataLong[sp + idx];
-//        if (fiber.isRecordingLevel(3))
-//            fiber.record(3, "Stack", "getInt", "%d (%d) %s", idx, sp + idx, value);
-//        return value;
     }
 
     public final float getFloat(int idx) {
         return Float.intBitsToFloat((int) dataLong[sp + idx]);
-//        final float value = Float.intBitsToFloat((int) dataLong[sp + idx]);
-//        if (fiber.isRecordingLevel(3))
-//            fiber.record(3, "Stack", "getFloat", "%d (%d) %s", idx, sp + idx, value);
-//        return value;
     }
 
     public final long getLong(int idx) {
         return dataLong[sp + idx];
-//        final long value = dataLong[sp + idx];
-//        if (fiber.isRecordingLevel(3))
-//            fiber.record(3, "Stack", "getLong", "%d (%d) %s", idx, sp + idx, value);
-//        return value;
     }
 
     public final double getDouble(int idx) {
         return Double.longBitsToDouble(dataLong[sp + idx]);
-//        final double value = Double.longBitsToDouble(dataLong[sp + idx]);
-//        if (fiber.isRecordingLevel(3))
-//            fiber.record(3, "Stack", "getDouble", "%d (%d) %s", idx, sp + idx, value);
-//        return value;
     }
 
     public final Object getObject(int idx) {
         return dataObject[sp + idx];
-//        final Object value = dataObject[sp + idx];
-//        if (fiber.isRecordingLevel(3))
-//            fiber.record(3, "Stack", "getObject", "%d (%d) %s", idx, sp + idx, value);
-//        return value;
     }
+    //</editor-fold>
 
     ///////////////////////////////////////////////////////////////
     private static long setEntry(long record, int entry) {
@@ -493,61 +351,4 @@ public final class Stack implements Serializable {
             this(method, line, true);
         }
     }
-
-    //<editor-fold defaultstate="collapsed" desc="Recording">
-    /////////// Recording ///////////////////////////////////
-    protected final boolean isRecordingLevel(int level) {
-        if (!Debug.isDebug())
-            return false;
-        final FlightRecorder.ThreadRecorder recorder = flightRecorder.get();
-        if (recorder == null)
-            return false;
-        return recorder.recordsLevel(level);
-    }
-
-    protected final void record(int level, String clazz, String method, String format) {
-        if (flightRecorder != null)
-            record(flightRecorder.get(), level, clazz, method, format);
-    }
-
-    protected final void record(int level, String clazz, String method, String format, Object arg1) {
-        if (flightRecorder != null)
-            record(flightRecorder.get(), level, clazz, method, format, arg1);
-    }
-
-    protected final void record(int level, String clazz, String method, String format, Object arg1, Object arg2) {
-        if (flightRecorder != null)
-            record(flightRecorder.get(), level, clazz, method, format, arg1, arg2);
-    }
-
-    protected final void record(int level, String clazz, String method, String format, Object arg1, Object arg2, Object arg3) {
-        if (flightRecorder != null)
-            record(flightRecorder.get(), level, clazz, method, format, arg1, arg2, arg3);
-    }
-
-    private static void record(FlightRecorder.ThreadRecorder recorder, int level, String clazz, String method, String format) {
-        if (recorder != null)
-            recorder.record(level, makeFlightRecorderMessage(recorder, clazz, method, format, null));
-    }
-
-    private static void record(FlightRecorder.ThreadRecorder recorder, int level, String clazz, String method, String format, Object arg1) {
-        if (recorder != null)
-            recorder.record(level, makeFlightRecorderMessage(recorder, clazz, method, format, new Object[]{arg1}));
-    }
-
-    private static void record(FlightRecorder.ThreadRecorder recorder, int level, String clazz, String method, String format, Object arg1, Object arg2) {
-        if (recorder != null)
-            recorder.record(level, makeFlightRecorderMessage(recorder, clazz, method, format, new Object[]{arg1, arg2}));
-    }
-
-    private static void record(FlightRecorder.ThreadRecorder recorder, int level, String clazz, String method, String format, Object arg1, Object arg2, Object arg3) {
-        if (recorder != null)
-            recorder.record(level, makeFlightRecorderMessage(recorder, clazz, method, format, new Object[]{arg1, arg2, arg3}));
-    }
-
-    private static FlightRecorderMessage makeFlightRecorderMessage(FlightRecorder.ThreadRecorder recorder, String clazz, String method, String format, Object[] args) {
-        return new FlightRecorderMessage(clazz, method, format, args);
-        //return ((FlightRecorderMessageFactory) recorder.getAux()).makeFlightRecorderMessage(clazz, method, format, args);
-    }
-    //</editor-fold>
 }
