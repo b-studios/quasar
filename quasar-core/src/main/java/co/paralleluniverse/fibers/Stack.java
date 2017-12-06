@@ -21,6 +21,74 @@ import java.util.Arrays;
  *
  * ANY CHANGE IN THIS CLASS NEEDS TO BE SYNCHRONIZED WITH {@link co.paralleluniverse.fibers.instrument.InstrumentMethod}
  *
+ *
+ * Example Usage
+ * -------------
+ * Create an empty stack
+ *
+ *     s = new Stack(null, 16)
+ *
+ * Enter our first method, will return 0 since we never entered this method
+ * before:
+ *
+ *     s.nextMethodEntry()                   m=0 entry=0 sp=1 slots=0 prevSlots=0
+ *     ... do some work ...
+ *
+ * Save the state of this method, continues with label 1, and makes space for
+ * 2 registers
+ *     s.pushMethod(1, 2)                    m=0 entry=1 sp=1 slots=2 prevSlots=0
+ *     Stack.push(true, s, 0)
+ *     Stack.push(2, s, 1)                   m=0 entry=1 sp=1 slots=2 prevSlots=0
+ *                                                   sp=1 long=0 obj=true
+ *                                                   sp=2 long=2 obj=null
+ *
+ * Enter another method, again will return 0
+ *
+ *     s.nextMethodEntry()                  m=0 entry=1 sp=1 slots=2 prevSlots=0
+ *                                                   sp=1 long=0 obj=true
+ *                                                   sp=2 long=2 obj=null
+ *                                          m=1 entry=0 sp=4 slots=0 prevSlots=2
+ *     ... do some work ...
+ *
+ * Also save the state for this method, continues with label 7, and makes
+ * space for 1 register
+ *
+ *     s.pushMethod(7, 1)
+ *     Stack.push(42, s, 0)                 m=0 entry=1 sp=1 slots=2 prevSlots=0
+ *                                                  sp=1 long=0 obj=true
+ *                                                  sp=2 long=2 obj=null
+ *                                          m=1 entry=7 sp=4 slots=1 prevSlots=2
+ *                                                  sp=4 long=42 obj=null
+ *
+ * Reset the stack pointer to point to the base (sp=0)
+ *
+ *     s.resumeStack
+ *
+ *
+ * A method thus has the shape:
+ *
+ * void foo() {
+ *
+ *   pc = s.nextMethodEntry()
+ *   switch (pc) {
+ *      case 1:
+ *         ...
+ *      case 2:
+ *         ...
+ *      default:
+ *         firstEntry = s.isFirstInStackOrPushed
+ *
+ *         if (!firstEntry) {
+ *           // the stack is set to null to remember
+ *           // there is nothing we need to store.
+ *           s = null
+ *         }
+ *   }
+ *
+ *
+ * }
+ *
+ *
  * @author Matthias Mann
  * @author Ron Pressler
  */
@@ -38,10 +106,13 @@ public final class Stack implements Serializable {
     public static final int MAX_SLOTS = (1 << 16) - 1;
     private static final int INITIAL_METHOD_STACK_DEPTH = 16;
     private static final int FRAME_RECORD_SIZE = 1;
+    private static final int EMPTY = -1;
     private static final long serialVersionUID = 12786283751253L;
     private final Object context;
-    private int sp;
-    private transient boolean pushed;
+
+    // we use -1 as a special value to indicate the empty or freshly resumed stack
+    // the first frame record is stored at 0 and the first data is stored at 1
+    private int sp = EMPTY;
     private Object suspendedContext;
     private long[] dataLong;        // holds primitives on stack as well as each method's entry point and the stack pointer
     private Object[] dataObject;    // holds refs on stack
@@ -108,8 +179,8 @@ public final class Stack implements Serializable {
      * until the shadow-stack is "copied" from the heap to
      * the actual JVM stack.
      */
-    final void resumeStack() {
-        sp = 0;
+    public final void resumeStack() {
+        sp = EMPTY;
     }
 
     // for testing/benchmarking only
@@ -125,53 +196,72 @@ public final class Stack implements Serializable {
      * Either the entry has been pushed before by usage of
      * "pushMethod" or it is assumed to be 0
      *
+     * Also changes the sp to point to the next frame
+     *
      * @return the entry point of this method
      */
     public final int nextMethodEntry() {
 
-        int idx = 0;
-        int slots = 0;
-
-        // there is a method entry, at all.
-        if (sp > 0) {
-
-            slots = getNumSlots(dataLong[sp - FRAME_RECORD_SIZE]);
-            idx = sp + slots;
+        // this is the very first entry (potentially since a resume)
+        if (sp == EMPTY) {
+            sp = FRAME_RECORD_SIZE;
+            return getEntry(currentFrameRecord());
         }
-        sp = idx + FRAME_RECORD_SIZE;
-        long record = dataLong[idx];
-        int entry = getEntry(record);
-        // TODO understand why we set slots here again?
-        dataLong[idx] = setPrevNumSlots(record, slots);
 
-        return entry;
+        final long prev = currentFrameRecord();
+
+        // this is a special case!
+        // the previous slot is unused (probably because it is the
+        // very first slot on the stack and we never entered a method
+        // so far), so we just use it and return 0;
+        if (isEmpty(prev))
+            return 0;
+
+        moveToNextFrame();
+        updateFrameRecord(getNumSlots(prev));
+        return getEntry(currentFrameRecord());
+    }
+
+    // increment the sp pointer to point to the next frame
+    private final void moveToNextFrame() {
+        final int prevSlots = getNumSlots(currentFrameRecord());
+        final int nextIndex = sp + prevSlots;
+        sp = nextIndex + FRAME_RECORD_SIZE;
+    }
+
+    private final long currentFrameRecord() {
+        return dataLong[sp - FRAME_RECORD_SIZE];
+    }
+
+    /**
+     * Updates the current frame record by setting the number of slots
+     * of the previous slot. It is necessary to do this early, in case
+     * an exception is being thrown before the corresponding pushMethod
+     * happens.
+     */
+    private final void updateFrameRecord(int slots) {
+        final int idx = sp - FRAME_RECORD_SIZE;
+        dataLong[idx] = setPrevNumSlots(dataLong[idx], slots);
     }
 
     /**
      * called when nextMethodEntry returns 0
+     *
+     * Ignore fast path for now!
      */
     public final boolean isFirstInStackOrPushed() {
-        boolean p = pushed;
-        pushed = false;
-
-        if (sp == FRAME_RECORD_SIZE | p)
-            return true;
-
-        // not first, but nextMethodEntry returned 0: revert changes
-        sp -= FRAME_RECORD_SIZE + getPrevNumSlots(dataLong[sp - FRAME_RECORD_SIZE]);
-
-        return false;
+        return true;
     }
 
     /**
-     * Called before a method is called.
+     * Called before another, effectful method is called.
+     * Reserves enough space on the stack to stores the state of the
+     * current method, before entering the other method.
      *
      * @param entry    the entry point in the current method for resume
      * @param numSlots the number of required stack slots for storing the state of the current method
      */
     public final void pushMethod(int entry, int numSlots) {
-        pushed = true;
-
         int idx = sp - FRAME_RECORD_SIZE;
         long record = dataLong[idx];
         record = setEntry(record, entry);
@@ -187,10 +277,11 @@ public final class Stack implements Serializable {
         dataLong[nextMethodIdx] = 0L;
     }
 
+    /**
+     * Called when a method is left (but not by suspending) and
+     * the stack needs to be cleaned up.
+     */
     public final void popMethod() {
-
-        pushed = false;
-
         final int oldSP = sp;
         final int idx = oldSP - FRAME_RECORD_SIZE;
         final long record = dataLong[idx];
@@ -223,7 +314,7 @@ public final class Stack implements Serializable {
     public void dump() {
         int m = 0;
         int k = 0;
-        while (k < sp - 1) {
+        while (k < sp) {
             final long record = dataLong[k++];
             final int slots = getNumSlots(record);
 
@@ -304,6 +395,12 @@ public final class Stack implements Serializable {
     private static int getPrevNumSlots(long record) {
         return (int) getUnsignedBits(record, 30, 16);
     }
+
+    private static boolean isEmpty(long record) {
+        return getEntry(record) == 0;
+    }
+
+
     ///////////////////////////////////////////////////////////////
     private static final long MASK_FULL = 0xffffffffffffffffL;
 
