@@ -1,22 +1,18 @@
 /*
  * Quasar: lightweight threads and actors for the JVM.
  * Copyright (c) 2013-2015, Parallel Universe Software Co. All rights reserved.
- * 
+ *
  * This program and the accompanying materials are dual-licensed under
  * either the terms of the Eclipse Public License v1.0 as published by
  * the Eclipse Foundation
- *  
+ *
  *   or (per the licensee's choosing)
- *  
+ *
  * under the terms of the GNU Lesser General Public License version 3.0
  * as published by the Free Software Foundation.
  */
 package co.paralleluniverse.fibers;
 
-import co.paralleluniverse.common.monitoring.FlightRecorder;
-import co.paralleluniverse.common.monitoring.FlightRecorderMessage;
-import co.paralleluniverse.common.util.Debug;
-import co.paralleluniverse.common.util.Objects;
 import java.io.Serializable;
 import java.util.Arrays;
 
@@ -29,7 +25,7 @@ import java.util.Arrays;
  * @author Ron Pressler
  */
 public final class Stack implements Serializable {
-    protected static final FlightRecorder flightRecorder = Debug.isDebug() ? Debug.getGlobalFlightRecorder() : null;
+
     /*
      * sp points to the first slot to contain data.
      * The _previous_ FRAME_RECORD_SIZE slots contain the frame record.
@@ -50,7 +46,7 @@ public final class Stack implements Serializable {
     private long[] dataLong;        // holds primitives on stack as well as each method's entry point and the stack pointer
     private Object[] dataObject;    // holds refs on stack
 
-    Stack(Object context, int stackSize) {
+    public Stack(Object context, int stackSize) {
         if (stackSize <= 0)
             throw new IllegalArgumentException("stackSize: " + stackSize);
 
@@ -61,7 +57,7 @@ public final class Stack implements Serializable {
         resumeStack();
     }
 
-    Stack(Object context, Stack s) {
+    public Stack(Object context, Stack s) {
         this.context = context;
         this.dataLong = Arrays.copyOf(s.dataLong, s.dataLong.length);
         this.dataObject = Arrays.copyOf(s.dataObject, s.dataObject.length);
@@ -70,7 +66,7 @@ public final class Stack implements Serializable {
 
     @Override
     public String toString() {
-        return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this)) + "{sp: " + sp + " pauseContext: " + Objects.systemToStringSimpleName(suspendedContext) + '}';
+        return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this)) + "{sp: " + sp + "}";
     }
 
 
@@ -122,17 +118,23 @@ public final class Stack implements Serializable {
     }
 
     /**
-     * called at the beginning of a method
+     * Called at the beginning of a method to return the
+     * jump-label of the next entry point or 0, if
+     * the method is being entered for the first time.
      *
-     * either the entry has been pushed before by usage of
+     * Either the entry has been pushed before by usage of
      * "pushMethod" or it is assumed to be 0
      *
      * @return the entry point of this method
      */
     public final int nextMethodEntry() {
+
         int idx = 0;
         int slots = 0;
+
+        // there is a method entry, at all.
         if (sp > 0) {
+
             slots = getNumSlots(dataLong[sp - FRAME_RECORD_SIZE]);
             idx = sp + slots;
         }
@@ -334,21 +336,5 @@ public final class Stack implements Serializable {
 
     private static long setBit(long word, int offset, boolean value) {
         return setBits(word, offset, 1, value ? 1 : 0);
-    }
-
-    static class TraceLine {
-        final String method;
-        final int line;
-        final boolean pushed;
-
-        TraceLine(String method, int line, boolean pushed) {
-            this.method = method;
-            this.line = line;
-            this.pushed = pushed;
-        }
-
-        TraceLine(String method, int line) {
-            this(method, line, true);
-        }
     }
 }
