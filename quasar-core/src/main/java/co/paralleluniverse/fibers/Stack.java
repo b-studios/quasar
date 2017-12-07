@@ -114,9 +114,9 @@ public final class Stack implements Serializable {
      */
     // we use -1 as a special value to indicate the empty or freshly resumed stack
     // the first frame record is stored at 0 and the first data is stored at 1
-    private int sp = EMPTY;
-    private long[] dataLong;        // holds primitives on stack as well as each method's entry point and the stack pointer
-    private Object[] dataObject;    // holds refs on stack
+    int sp = EMPTY;
+    long[] dataLong;        // holds primitives on stack as well as each method's entry point and the stack pointer
+    Object[] dataObject;    // holds refs on stack
 
     //<editor-fold defaultstate="collapsed" desc="Constructors">
 
@@ -151,7 +151,7 @@ public final class Stack implements Serializable {
     }
 
     public final void resumeAt(Marker frame) {
-        sp = frame.pointer;
+        sp = frame.pointer + FRAME_RECORD_SIZE;
     }
 
     /**
@@ -161,11 +161,58 @@ public final class Stack implements Serializable {
      * @param frame
      * @return the segment above frame
      */
-    public final Segment popSegmentAt(Marker frame) {
-        return null;
+    public final Segment popSegmentAbove(Marker frame) {
+
+        if (frame.pointer > sp)
+            throw new IllegalArgumentException("Can't copy something above stack pointer: " + sp + ". Marker is " + frame.pointer);
+
+        // we are already done if there is nothing to copy.
+        if (sp == EMPTY)
+            return new Segment();
+
+        final int fromIdx = Math.max(frame.pointer, 0);
+        final int toIdx =  sp + getNumSlots(currentFrameRecord());
+        final int oldSp = sp;
+
+        long[] values = Arrays.copyOfRange(dataLong, fromIdx, toIdx);
+        Object[] refs = Arrays.copyOfRange(dataObject, fromIdx, toIdx);
+
+        // first frame in the copied segment
+        final long firstFrame = dataLong[fromIdx];
+
+        // last frame in the stack after popping segment
+        sp = fromIdx - getPrevNumSlots(firstFrame);
+
+        // clear the next available frame record for next entry
+        dataLong[fromIdx] = 0L;
+
+        // help garbage collector and clear references
+        Arrays.fill(dataObject, fromIdx, toIdx, null);
+
+        return new Segment(values, refs, oldSp - sp);
     }
 
-    public final void pushSegment(Segment s) { }
+    public final void pushSegment(Segment s) {
+        // (1) make enough space available to push Segment
+        long curr = currentFrameRecord();
+        int currSlots = getNumSlots(curr);
+        int firstIdx = sp + currSlots;
+        int lastFrame = firstIdx + s.values.length;
+        growStack(lastFrame + FRAME_RECORD_SIZE);
+
+        // (2) copy segment
+        System.arraycopy(s.values, 0, dataLong, firstIdx, s.values.length);
+        System.arraycopy(s.refs, 0, dataObject, firstIdx, s.refs.length);
+
+        // (3) update prevSlots in next slots of segment
+        dataLong[firstIdx] = setPrevNumSlots(dataLong[firstIdx], currSlots);
+
+        // (4) clear next slot after copied segment
+        dataLong[lastFrame] = 0L;
+
+        // (5) set stack pointer to last frame on stack
+        sp += s.sp;
+    }
 
     /**
      * called when resuming a stack
@@ -298,11 +345,10 @@ public final class Stack implements Serializable {
         //
         // however it could be redundant, since pushMethod also
         // always clears the next frame record.
-        dataLong[idx] = 0L;
+//        dataLong[idx] = 0L;
 
         // help GC
-        for (int i = oldSP; i < oldSP + slots; i++)
-            dataObject[i] = null;
+        Arrays.fill(dataObject, oldSP, oldSP + slots, null);
 
         sp = newSP;
     }
@@ -343,6 +389,12 @@ public final class Stack implements Serializable {
             for (int i = 0; i < slots; i++, k++)
                 System.out.println("\t\tsp=" + k + " long=" + dataLong[k] + " obj=" + dataObject[k]);
         }
+    }
+
+    public Stack clone() {
+        Stack copy = new Stack(context, this);
+        copy.sp = this.sp;
+        return copy;
     }
 
     //<editor-fold defaultstate="collapsed" desc="Specialized Push Methods">
@@ -479,10 +531,21 @@ public final class Stack implements Serializable {
     }
     //</editor-fold>
 
+    /**
+     * Important: The first frame on the stack-segment still has a "prevSlots"
+     *            count that might be out-of date, when repushed. We need to
+     *            keep that updated.
+     */
     public final class Segment implements Serializable {
         final long[] values;  // holds primitives on stack as well as each method's entry point and the stack pointer
         final Object[] refs;  // holds refs on stack
-        final int sp;         // currently only used for dumping
+        final int sp;         // relative stack pointer
+
+        Segment() {
+            this.values = new long[] {};
+            this.refs = new Object[] {};
+            this.sp = EMPTY;
+        }
 
         Segment(long[] values, Object[] refs, int sp) {
             this.values = values;
@@ -499,9 +562,9 @@ public final class Stack implements Serializable {
                 final long record = values[k++];
                 final int slots = getNumSlots(record);
 
-                out.append("\tm=" + (m++) + " entry=" + getEntry(record) + " sp=" + k + " slots=" + slots + " prevSlots=" + getPrevNumSlots(record));
+                out.append("\tm=" + (m++) + " entry=" + getEntry(record) + " sp=" + k + " slots=" + slots + " prevSlots=" + getPrevNumSlots(record) + "\n");
                 for (int i = 0; i < slots; i++, k++)
-                    out.append("\t\tsp=" + k + " long=" + values[k] + " obj=" + refs[k]);
+                    out.append("\t\tsp=" + k + " long=" + values[k] + " obj=" + refs[k] + "\n");
             }
             return out.toString();
         }
