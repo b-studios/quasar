@@ -143,15 +143,15 @@ public final class Stack implements Serializable {
     }
     //</editor-fold>
 
-    public final int currentFrame() {
+    public final Marker currentFrame() {
         if (sp == EMPTY)
-            return EMPTY;
+            return new Marker(EMPTY);
         else
-            return sp - FRAME_RECORD_SIZE;
+            return new Marker(sp - FRAME_RECORD_SIZE);
     }
 
-    public final void resumeAt(int frame) {
-        sp = frame;
+    public final void resumeAt(Marker frame) {
+        sp = frame.pointer;
     }
 
     /**
@@ -161,7 +161,7 @@ public final class Stack implements Serializable {
      * @param frame
      * @return the segment above frame
      */
-    public final Segment popSegmentAt(int frame) {
+    public final Segment popSegmentAt(Marker frame) {
         return null;
     }
 
@@ -178,7 +178,7 @@ public final class Stack implements Serializable {
      * the actual JVM stack.
      */
     public final void resumeStack() {
-        resumeAt(EMPTY);
+        sp = EMPTY;
     }
 
     // for testing/benchmarking only
