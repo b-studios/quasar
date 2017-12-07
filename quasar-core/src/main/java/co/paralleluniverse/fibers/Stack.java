@@ -94,6 +94,16 @@ import java.util.Arrays;
  */
 public final class Stack implements Serializable {
 
+    //<editor-fold defaultstate="collapsed" desc="Constants">
+    public static final int MAX_ENTRY = (1 << 14) - 1;
+    public static final int MAX_SLOTS = (1 << 16) - 1;
+    private static final int INITIAL_METHOD_STACK_DEPTH = 16;
+    private static final int FRAME_RECORD_SIZE = 1;
+    private static final int EMPTY = -1;
+    private static final long serialVersionUID = 12786283751253L;
+    private final Object context;
+    //</editor-fold>
+
     /*
      * sp points to the first slot to contain data.
      * The _previous_ FRAME_RECORD_SIZE slots contain the frame record.
@@ -102,20 +112,17 @@ public final class Stack implements Serializable {
      *   - num slots          : 16 bits
      *   - prev method slots  : 16 bits
      */
-    public static final int MAX_ENTRY = (1 << 14) - 1;
-    public static final int MAX_SLOTS = (1 << 16) - 1;
-    private static final int INITIAL_METHOD_STACK_DEPTH = 16;
-    private static final int FRAME_RECORD_SIZE = 1;
-    private static final int EMPTY = -1;
-    private static final long serialVersionUID = 12786283751253L;
-    private final Object context;
-
     // we use -1 as a special value to indicate the empty or freshly resumed stack
     // the first frame record is stored at 0 and the first data is stored at 1
     private int sp = EMPTY;
-    private Object suspendedContext;
     private long[] dataLong;        // holds primitives on stack as well as each method's entry point and the stack pointer
     private Object[] dataObject;    // holds refs on stack
+
+    //<editor-fold defaultstate="collapsed" desc="Constructors">
+
+    public Stack(int stackSize) {
+        this(null, stackSize);
+    }
 
     public Stack(Object context, int stackSize) {
         if (stackSize <= 0)
@@ -134,40 +141,31 @@ public final class Stack implements Serializable {
         this.dataObject = Arrays.copyOf(s.dataObject, s.dataObject.length);
         resumeStack();
     }
+    //</editor-fold>
 
-    @Override
-    public String toString() {
-        return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this)) + "{sp: " + sp + "}";
+    public final int currentFrame() {
+        if (sp == EMPTY)
+            return EMPTY;
+        else
+            return sp - FRAME_RECORD_SIZE;
     }
 
+    public final void resumeAt(int frame) {
+        sp = frame;
+    }
 
-    public static Stack getStack() {
-        final Continuation<?, ?> currentCont = Continuation.getCurrentContinuation();
-        if (currentCont != null)
-            return currentCont.getStack();
-        final Fiber<?> currentFiber = Fiber.currentFiber();
-        if (currentFiber != null)
-            return currentFiber.stack;
+    /**
+     * Splits the stack at position frame, copies everything into
+     * a stack segment and zeros out the next frame record.
+     * 
+     * @param frame
+     * @return the segment above frame
+     */
+    public final Segment popSegmentAt(int frame) {
         return null;
     }
 
-    void setSuspendedContext(Object context) {
-        this.suspendedContext = context;
-    }
-
-    Fiber getFiber() {
-        return context instanceof Fiber ? (Fiber) context : null;
-    }
-
-    public Continuation getAndClearSuspendedContinuation() {
-        Object c = getSuspendedContext();
-        setSuspendedContext(null);
-        return (Continuation) c;
-    }
-
-    Object getSuspendedContext() {
-        return suspendedContext;
-    }
+    public final void pushSegment(Segment s) { }
 
     /**
      * called when resuming a stack
@@ -180,7 +178,7 @@ public final class Stack implements Serializable {
      * the actual JVM stack.
      */
     public final void resumeStack() {
-        sp = EMPTY;
+        resumeAt(EMPTY);
     }
 
     // for testing/benchmarking only
@@ -262,6 +260,10 @@ public final class Stack implements Serializable {
      * @param numSlots the number of required stack slots for storing the state of the current method
      */
     public final void pushMethod(int entry, int numSlots) {
+
+        if (sp == EMPTY)
+            throw new RuntimeException("can't push a method, before a method is entered. Use nextMethodEntry, before pushMethod.");
+
         int idx = sp - FRAME_RECORD_SIZE;
         long record = dataLong[idx];
         record = setEntry(record, entry);
@@ -273,7 +275,8 @@ public final class Stack implements Serializable {
         if (nextMethodSP > dataObject.length)
             growStack(nextMethodSP);
 
-        // clear next method's frame record
+        // clear next method's frame record to guarantee that
+        // the entry point is 0.
         dataLong[nextMethodIdx] = 0L;
     }
 
@@ -290,8 +293,11 @@ public final class Stack implements Serializable {
 
         // clear frame record
         // ---
-        // this is essential, since the stackpointer needs to be 0
+        // this is essential, since the entry point needs to be 0
         // next time we encounter a new method call.
+        //
+        // however it could be redundant, since pushMethod also
+        // always clears the next frame record.
         dataLong[idx] = 0L;
 
         // help GC
@@ -311,6 +317,21 @@ public final class Stack implements Serializable {
         dataObject = Arrays.copyOf(dataObject, newSize);
     }
 
+    public static Stack getStack() {
+        final Continuation<?, ?> currentCont = Continuation.getCurrentContinuation();
+        if (currentCont != null)
+            return currentCont.getStack();
+        final Fiber<?> currentFiber = Fiber.currentFiber();
+        if (currentFiber != null)
+            return currentFiber.stack;
+        return null;
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + '@' + Integer.toHexString(System.identityHashCode(this)) + "{sp: " + sp + "}";
+    }
+
     public void dump() {
         int m = 0;
         int k = 0;
@@ -323,7 +344,6 @@ public final class Stack implements Serializable {
                 System.out.println("\t\tsp=" + k + " long=" + dataLong[k] + " obj=" + dataObject[k]);
         }
     }
-
 
     //<editor-fold defaultstate="collapsed" desc="Specialized Push Methods">
     /////////// Specialized Push Methods ///////////////////////////////////
@@ -371,6 +391,7 @@ public final class Stack implements Serializable {
     }
     //</editor-fold>
 
+    //<editor-fold defaultstate="collapsed" desc="Frame Entry Methods">
     ///////////////////////////////////////////////////////////////
     private static long setEntry(long record, int entry) {
         return setBits(record, 0, 14, entry);
@@ -399,8 +420,9 @@ public final class Stack implements Serializable {
     private static boolean isEmpty(long record) {
         return getEntry(record) == 0;
     }
+    //</editor-fold>
 
-
+    //<editor-fold defaultstate="collapsed" desc="Bit Utils">
     ///////////////////////////////////////////////////////////////
     private static final long MASK_FULL = 0xffffffffffffffffL;
 
@@ -433,5 +455,68 @@ public final class Stack implements Serializable {
 
     private static long setBit(long word, int offset, boolean value) {
         return setBits(word, offset, 1, value ? 1 : 0);
+    }
+    //</editor-fold>
+
+    //<editor-fold defaultstate="collapsed" desc="Suspended Context">
+    private Object suspendedContext;
+    void setSuspendedContext(Object context) {
+        this.suspendedContext = context;
+    }
+
+    Fiber getFiber() {
+        return context instanceof Fiber ? (Fiber) context : null;
+    }
+
+    public Continuation getAndClearSuspendedContinuation() {
+        Object c = getSuspendedContext();
+        setSuspendedContext(null);
+        return (Continuation) c;
+    }
+
+    Object getSuspendedContext() {
+        return suspendedContext;
+    }
+    //</editor-fold>
+
+    public final class Segment implements Serializable {
+        final long[] values;  // holds primitives on stack as well as each method's entry point and the stack pointer
+        final Object[] refs;  // holds refs on stack
+        final int sp;         // currently only used for dumping
+
+        Segment(long[] values, Object[] refs, int sp) {
+            this.values = values;
+            this.refs = refs;
+            this.sp = sp;
+        }
+
+        @Override
+        public String toString() {
+            StringBuffer out = new StringBuffer();
+            int m = 0;
+            int k = 0;
+            while (k < sp) {
+                final long record = values[k++];
+                final int slots = getNumSlots(record);
+
+                out.append("\tm=" + (m++) + " entry=" + getEntry(record) + " sp=" + k + " slots=" + slots + " prevSlots=" + getPrevNumSlots(record));
+                for (int i = 0; i < slots; i++, k++)
+                    out.append("\t\tsp=" + k + " long=" + values[k] + " obj=" + refs[k]);
+            }
+            return out.toString();
+        }
+    }
+
+    public final class Marker implements Serializable {
+        final int pointer;
+
+        Marker(int pointer) {
+            this.pointer = pointer;
+        }
+
+        @Override
+        public String toString() {
+            return "Marker(" + pointer + ")";
+        }
     }
 }
