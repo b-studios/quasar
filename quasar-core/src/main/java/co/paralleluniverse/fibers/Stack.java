@@ -101,6 +101,11 @@ public final class Stack implements Serializable {
     private static final int FRAME_RECORD_SIZE = 1;
     private static final int EMPTY = -1;
     private static final long serialVersionUID = 12786283751253L;
+    private static final ThreadLocal<Stack> globalStack = new ThreadLocal<Stack>() {
+        @Override protected Stack initialValue() {
+            return new Stack(null, INITIAL_METHOD_STACK_DEPTH);
+        }
+    };
     private final Object context;
     //</editor-fold>
 
@@ -143,6 +148,7 @@ public final class Stack implements Serializable {
     }
     //</editor-fold>
 
+    //<editor-fold defaultstate="collapsed" desc="DelimCC Operations">
     public final Marker currentFrame() {
         if (sp == EMPTY)
             return new Marker(EMPTY);
@@ -151,6 +157,7 @@ public final class Stack implements Serializable {
     }
 
     public final void resumeAt(Marker frame) {
+        System.out.println("resume at " + frame);
         sp = frame.pointer + FRAME_RECORD_SIZE;
     }
 
@@ -162,6 +169,7 @@ public final class Stack implements Serializable {
      * @return the segment above frame
      */
     public final Segment popSegmentAbove(Marker frame) {
+        System.out.println("popSegmentAbove " + frame);
 
         if (frame.pointer > sp)
             throw new IllegalArgumentException("Can't copy something above stack pointer: " + sp + ". Marker is " + frame.pointer);
@@ -193,6 +201,8 @@ public final class Stack implements Serializable {
     }
 
     public final void pushSegment(Segment s) {
+        System.out.println("pushSegment " + s);
+
         // (1) make enough space available to push Segment
         long curr = currentFrameRecord();
         int currSlots = getNumSlots(curr);
@@ -213,6 +223,8 @@ public final class Stack implements Serializable {
         // (5) set stack pointer to last frame on stack
         sp += s.sp;
     }
+
+    //</editor-fold>
 
     /**
      * called when resuming a stack
@@ -246,7 +258,7 @@ public final class Stack implements Serializable {
      * @return the entry point of this method
      */
     public final int nextMethodEntry() {
-
+        System.out.println("nextMethodEntry");
         // this is the very first entry (potentially since a resume)
         if (sp == EMPTY) {
             sp = FRAME_RECORD_SIZE;
@@ -275,6 +287,9 @@ public final class Stack implements Serializable {
     }
 
     private final long currentFrameRecord() {
+        // TODO check what's the sensible solution here
+        if (sp <= 0) return 0L;
+
         return dataLong[sp - FRAME_RECORD_SIZE];
     }
 
@@ -307,7 +322,7 @@ public final class Stack implements Serializable {
      * @param numSlots the number of required stack slots for storing the state of the current method
      */
     public final void pushMethod(int entry, int numSlots) {
-
+        System.out.println("pushMethod. entry: " + entry + " numSlots " + numSlots);
         if (sp == EMPTY)
             throw new RuntimeException("can't push a method, before a method is entered. Use nextMethodEntry, before pushMethod.");
 
@@ -332,6 +347,12 @@ public final class Stack implements Serializable {
      * the stack needs to be cleaned up.
      */
     public final void popMethod() {
+        System.out.println("popMethod");
+        if (sp <= 0) {
+            dump();
+            throw new RuntimeException("can't pop method with sp at " + sp);
+        }
+
         final int oldSP = sp;
         final int idx = oldSP - FRAME_RECORD_SIZE;
         final long record = dataLong[idx];
@@ -345,7 +366,7 @@ public final class Stack implements Serializable {
         //
         // however it could be redundant, since pushMethod also
         // always clears the next frame record.
-//        dataLong[idx] = 0L;
+        dataLong[idx] = 0L;
 
         // help GC
         Arrays.fill(dataObject, oldSP, oldSP + slots, null);
@@ -370,7 +391,7 @@ public final class Stack implements Serializable {
         final Fiber<?> currentFiber = Fiber.currentFiber();
         if (currentFiber != null)
             return currentFiber.stack;
-        return null;
+        return globalStack.get();
     }
 
     @Override
@@ -556,6 +577,7 @@ public final class Stack implements Serializable {
         @Override
         public String toString() {
             StringBuffer out = new StringBuffer();
+            out.append("Segment(sp = " + sp + ")\n");
             int m = 0;
             int k = 0;
             while (k < sp) {
